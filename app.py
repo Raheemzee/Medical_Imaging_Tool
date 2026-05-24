@@ -14,33 +14,30 @@ import zipfile
 import threading
 import hashlib
 import time
-from config import Config
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
-app.config.from_object(Config)
-app.config['MAX_CONTENT_LENGTH'] = 500 * 1024 * 1024  # 500MB
-app.config['SEND_FILE_MAX_AGE_DEFAULT'] = 0
+app.config['MAX_CONTENT_LENGTH'] = 500 * 1024 * 1024
+app.config['UPLOAD_FOLDER'] = 'uploads'
 CORS(app)
 
 # Create necessary folders
-os.makedirs(Config.UPLOAD_FOLDER, exist_ok=True)
-os.makedirs(Config.STUDIES_FOLDER, exist_ok=True)
-os.makedirs(Config.DATABASE_FOLDER, exist_ok=True)
-os.makedirs(Config.EXPORTS_FOLDER, exist_ok=True)
-os.makedirs(Config.CACHE_FOLDER, exist_ok=True)
+os.makedirs('uploads', exist_ok=True)
+os.makedirs('studies', exist_ok=True)
+os.makedirs('database', exist_ok=True)
+os.makedirs('exports', exist_ok=True)
+os.makedirs('cache', exist_ok=True)
 
 
-class OptimizedMedicalServer:
-    """Optimized for Render deployment"""
+class MedicalImageServer:
+    """Complete medical image server"""
     
     def __init__(self):
-        self.studies_path = Config.STUDIES_FOLDER
-        self.cache_path = Config.CACHE_FOLDER
+        self.studies_path = 'studies'
+        self.cache_path = 'cache'
         self.preview_cache = {}
-        self.processing_queue = {}
         
     def get_dicom_metadata_fast(self, file_path):
         """Fast metadata extraction"""
@@ -60,12 +57,11 @@ class OptimizedMedicalServer:
             logger.error(f"Metadata extraction failed: {e}")
             return None
     
-    def generate_thumbnail_fast(self, file_path, max_size=256):
-        """Generate tiny thumbnail for fast display"""
+    def generate_preview_fast(self, file_path, max_size=512):
+        """Generate preview quickly"""
         try:
-            # Check cache
-            cache_key = hashlib.md5(f"{file_path}_thumb_{max_size}".encode()).hexdigest()
-            cache_file = os.path.join(self.cache_path, f"{cache_key}.jpg")
+            cache_key = hashlib.md5(f"{file_path}_{max_size}".encode()).hexdigest()
+            cache_file = os.path.join(self.cache_path, f"{cache_key}.png")
             
             if os.path.exists(cache_file):
                 return cache_file
@@ -80,77 +76,54 @@ class OptimizedMedicalServer:
             if len(pixel_array.shape) == 3:
                 pixel_array = pixel_array[0]
             
-            # Aggressive downsampling for thumbnail
             h, w = pixel_array.shape
             if h > max_size or w > max_size:
                 scale = max_size / max(h, w)
                 new_h = int(h * scale)
                 new_w = int(w * scale)
-                
-                # Simple downsampling
                 step_h = h // new_h
                 step_w = w // new_w
                 if step_h > 0 and step_w > 0:
                     pixel_array = pixel_array[::step_h, ::step_w]
             
-            # Normalize to 8-bit
             if pixel_array.max() > 0:
                 pixel_array = (pixel_array / pixel_array.max() * 255).astype(np.uint8)
             
             img = Image.fromarray(pixel_array)
-            img.save(cache_file, 'JPEG', quality=70, optimize=True)
+            img.save(cache_file, 'PNG', optimize=True)
             
             return cache_file
             
         except Exception as e:
-            logger.error(f"Thumbnail generation failed: {str(e)}")
+            logger.error(f"Preview generation failed: {str(e)}")
             return None
     
-    def save_dicom_async(self, file_path, study_uid):
-        """Save DICOM asynchronously to avoid timeout"""
+    def save_dicom(self, file_path, study_uid):
+        """Save DICOM file"""
         try:
             study_dir = os.path.join(self.studies_path, study_uid)
             os.makedirs(study_dir, exist_ok=True)
             
-            # Save metadata immediately
             metadata = self.get_dicom_metadata_fast(file_path)
             if metadata:
                 metadata['study_uid'] = study_uid
                 metadata['created_at'] = datetime.now().isoformat()
                 metadata['is_3d'] = False
-                metadata['processing'] = True  # Mark as processing
+                metadata['processing'] = False
                 
                 with open(os.path.join(study_dir, 'metadata.json'), 'w') as f:
                     json.dump(metadata, f)
             
-            # Copy original file
             dest_path = os.path.join(study_dir, 'image.dcm')
             shutil.copy2(file_path, dest_path)
             
-            # Start background processing
-            def process_in_background():
-                try:
-                    # Generate thumbnail
-                    thumb_path = self.generate_thumbnail_fast(dest_path)
-                    if thumb_path:
-                        shutil.copy2(thumb_path, os.path.join(study_dir, 'thumbnail.jpg'))
-                    
-                    # Generate preview (downsampled)
-                    preview = self.generate_thumbnail_fast(dest_path, 512)
-                    if preview:
-                        shutil.copy2(preview, os.path.join(study_dir, 'preview.png'))
-                    
-                    # Update metadata - processing complete
-                    metadata['processing'] = False
-                    with open(os.path.join(study_dir, 'metadata.json'), 'w') as f:
-                        json.dump(metadata, f)
-                    
-                    logger.info(f"Background processing completed for {study_uid}")
-                except Exception as e:
-                    logger.error(f"Background processing failed: {str(e)}")
+            # Generate preview in background
+            def generate_preview():
+                preview_path = self.generate_preview_fast(dest_path)
+                if preview_path:
+                    shutil.copy2(preview_path, os.path.join(study_dir, 'preview.png'))
             
-            # Run in background thread
-            thread = threading.Thread(target=process_in_background)
+            thread = threading.Thread(target=generate_preview)
             thread.start()
             
             return True
@@ -158,7 +131,7 @@ class OptimizedMedicalServer:
             logger.error(f"DICOM save failed: {str(e)}")
             return False
     
-    def save_image_fast(self, file_path, study_uid, patient_name="Unknown"):
+    def save_image(self, file_path, study_uid, patient_name="Unknown"):
         """Save regular image"""
         try:
             study_dir = os.path.join(self.studies_path, study_uid)
@@ -166,7 +139,6 @@ class OptimizedMedicalServer:
             
             img = Image.open(file_path)
             
-            # Convert to grayscale
             if img.mode == 'RGB':
                 img = img.convert('L')
             elif img.mode == 'RGBA':
@@ -174,17 +146,10 @@ class OptimizedMedicalServer:
                 rgb_img.paste(img, mask=img.split()[3] if len(img.split()) > 3 else None)
                 img = rgb_img.convert('L')
             
-            # Create thumbnail
-            thumb = img.copy()
-            thumb.thumbnail((128, 128))
-            thumb.save(os.path.join(study_dir, 'thumbnail.jpg'), 'JPEG', quality=70)
-            
-            # Create preview
             preview = img.copy()
             preview.thumbnail((512, 512))
             preview.save(os.path.join(study_dir, 'preview.png'))
             
-            # Save metadata
             metadata = {
                 'study_uid': study_uid,
                 'patient_name': patient_name,
@@ -204,8 +169,8 @@ class OptimizedMedicalServer:
             logger.error(f"Image save failed: {str(e)}")
             return False
     
-    def get_all_studies_fast(self, limit=30):
-        """Get studies with pagination"""
+    def get_all_studies(self, limit=50):
+        """Get all studies"""
         studies = []
         if not os.path.exists(self.studies_path):
             return studies
@@ -218,24 +183,20 @@ class OptimizedMedicalServer:
                     try:
                         with open(metadata_file, 'r') as f:
                             metadata = json.load(f)
-                        
-                        # Check if still processing
-                        is_processing = metadata.get('processing', False)
-                        
                         studies.append({
                             'StudyInstanceUID': study_name,
                             'PatientName': metadata.get('patient_name', metadata.get('PatientName', 'Unknown')),
                             'StudyDate': metadata.get('study_date', metadata.get('StudyDate', '')),
                             'Modality': metadata.get('modality', 'OT'),
                             'NumberOfInstances': 1,
-                            'processing': is_processing
+                            'processing': metadata.get('processing', False)
                         })
                     except:
                         continue
         return studies
     
-    def get_study_info_fast(self, study_uid):
-        """Get study info"""
+    def get_study_info(self, study_uid):
+        """Get study information"""
         study_path = os.path.join(self.studies_path, study_uid)
         metadata_file = os.path.join(study_path, 'metadata.json')
         
@@ -255,21 +216,6 @@ class OptimizedMedicalServer:
                 pass
         return {'pixel_spacing': 0.5, 'is_3d': False, 'slices': 1, 'patient_name': 'Unknown', 'modality': 'OT', 'processing': False}
     
-    def get_thumbnail(self, study_uid):
-        """Get thumbnail quickly"""
-        study_path = os.path.join(self.studies_path, study_uid)
-        thumb_path = os.path.join(study_path, 'thumbnail.jpg')
-        
-        if os.path.exists(thumb_path):
-            return thumb_path
-        
-        # Fallback to preview
-        preview_path = os.path.join(study_path, 'preview.png')
-        if os.path.exists(preview_path):
-            return preview_path
-        
-        return None
-    
     def get_preview(self, study_uid):
         """Get preview image"""
         study_path = os.path.join(self.studies_path, study_uid)
@@ -278,10 +224,9 @@ class OptimizedMedicalServer:
         if os.path.exists(preview_path):
             return preview_path
         
-        # Generate if not exists
         dicom_path = os.path.join(study_path, 'image.dcm')
         if os.path.exists(dicom_path):
-            preview = self.generate_thumbnail_fast(dicom_path, 512)
+            preview = self.generate_preview_fast(dicom_path)
             if preview:
                 shutil.copy2(preview, preview_path)
                 return preview_path
@@ -304,7 +249,7 @@ class OptimizedMedicalServer:
             return True
         return False
 
-server = OptimizedMedicalServer()
+server = MedicalImageServer()
 
 
 # ==================== ROUTES ====================
@@ -316,7 +261,6 @@ def index():
 
 @app.route('/api/upload', methods=['POST'])
 def upload_files():
-    """Handle file uploads with immediate response"""
     try:
         files = request.files.getlist('files')
         patient_name = request.form.get('patient_name', 'Unknown')
@@ -328,7 +272,7 @@ def upload_files():
                 continue
             
             filename = secure_filename(file.filename)
-            temp_path = os.path.join(Config.UPLOAD_FOLDER, filename)
+            temp_path = os.path.join('uploads', filename)
             file.save(temp_path)
             
             study_uid = f"{int(datetime.now().timestamp())}_{len(uploaded_studies)}"
@@ -336,23 +280,20 @@ def upload_files():
             
             success = False
             if ext == 'dcm':
-                success = server.save_dicom_async(temp_path, study_uid)
+                success = server.save_dicom(temp_path, study_uid)
             elif ext in ['png', 'jpg', 'jpeg', 'bmp', 'tiff']:
-                success = server.save_image_fast(temp_path, study_uid, patient_name)
+                success = server.save_image(temp_path, study_uid, patient_name)
             
             if success:
                 uploaded_studies.append(study_uid)
             
-            # Clean up temp file
             if os.path.exists(temp_path):
                 os.remove(temp_path)
         
-        # Return immediately with uploaded studies
         return jsonify({
             'success': True,
             'uploaded': uploaded_studies,
-            'message': f'Uploaded {len(uploaded_studies)} files. Processing in background.',
-            'studies': server.get_all_studies_fast()
+            'studies': server.get_all_studies()
         })
     except Exception as e:
         logger.error(f"Upload failed: {str(e)}")
@@ -361,29 +302,15 @@ def upload_files():
 
 @app.route('/api/studies', methods=['GET'])
 def get_studies():
-    """Get all studies"""
     try:
-        studies = server.get_all_studies_fast(limit=30)
+        studies = server.get_all_studies()
         return jsonify({'success': True, 'studies': studies})
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-
-@app.route('/api/study/<study_uid>/thumbnail', methods=['GET'])
-def get_study_thumbnail(study_uid):
-    """Get thumbnail (fast)"""
-    try:
-        thumb_path = server.get_thumbnail(study_uid)
-        if thumb_path and os.path.exists(thumb_path):
-            return send_file(thumb_path, mimetype='image/jpeg')
-        return jsonify({'error': 'No thumbnail'}), 404
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
 
 @app.route('/api/study/<study_uid>/image', methods=['GET'])
 def get_study_image(study_uid):
-    """Get preview image"""
     try:
         preview_path = server.get_preview(study_uid)
         if preview_path and os.path.exists(preview_path):
@@ -395,23 +322,9 @@ def get_study_image(study_uid):
 
 @app.route('/api/study/<study_uid>/info', methods=['GET'])
 def get_study_info(study_uid):
-    """Get study information"""
     try:
-        info = server.get_study_info_fast(study_uid)
+        info = server.get_study_info(study_uid)
         return jsonify({'success': True, 'info': info})
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-
-@app.route('/api/study/<study_uid>/status', methods=['GET'])
-def get_study_status(study_uid):
-    """Check if study is still processing"""
-    try:
-        info = server.get_study_info_fast(study_uid)
-        return jsonify({
-            'success': True,
-            'processing': info.get('processing', False)
-        })
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
@@ -427,7 +340,7 @@ def delete_study(study_uid):
 
 @app.route('/api/study/<study_uid>/annotations', methods=['GET', 'POST'])
 def handle_annotations(study_uid):
-    annotations_file = os.path.join(Config.STUDIES_FOLDER, study_uid, 'annotations.json')
+    annotations_file = os.path.join('studies', study_uid, 'annotations.json')
     
     if request.method == 'GET':
         if os.path.exists(annotations_file):
@@ -438,7 +351,7 @@ def handle_annotations(study_uid):
     elif request.method == 'POST':
         annotations = request.json
         annotations['last_modified'] = datetime.now().isoformat()
-        os.makedirs(os.path.join(Config.STUDIES_FOLDER, study_uid), exist_ok=True)
+        os.makedirs(os.path.join('studies', study_uid), exist_ok=True)
         with open(annotations_file, 'w') as f:
             json.dump(annotations, f, indent=2)
         return jsonify({'success': True})
@@ -452,9 +365,8 @@ def export_study(study_uid):
         measurements = data.get('measurements', [])
         cell_count = data.get('cell_count', 0)
         
-        study_info = server.get_study_info_fast(study_uid)
+        study_info = server.get_study_info(study_uid)
         
-        # Create JSON export
         export_data = {
             'export_date': datetime.now().isoformat(),
             'study_uid': study_uid,
@@ -465,7 +377,7 @@ def export_study(study_uid):
             'export_format_version': '1.0'
         }
         
-        export_dir = os.path.join(Config.EXPORTS_FOLDER, study_uid)
+        export_dir = os.path.join('exports', study_uid)
         os.makedirs(export_dir, exist_ok=True)
         json_path = os.path.join(export_dir, f'export_{study_uid}.json')
         
@@ -489,12 +401,14 @@ if __name__ == '__main__':
     print("\n" + "="*60)
     print("🔬 PATHOLOGY MEDICAL IMAGING VIEWER")
     print("="*60)
-    print(f"📱 Access: http://{Config.HOST}:{Config.PORT}")
-    print("\n✅ OPTIMIZED FOR RENDER:")
-    print("   • Async background processing")
-    print("   • Immediate upload response")
-    print("   • Thumbnail-first loading")
-    print("   • 30s timeout handling")
+    print(f"📱 Access: http://127.0.0.1:5000")
+    print("\n✅ FEATURES:")
+    print("   • User-selectable units (µm, mm, cm, pixels)")
+    print("   • Cell counter with auto-numbering")
+    print("   • Measurements in any unit")
+    print("   • Unlimited Zoom (10% - 1000%)")
+    print("   • Angle & Bi-directional measurements")
+    print("   • JSON Export")
     print("="*60 + "\n")
     
-    app.run(host=Config.HOST, port=Config.PORT, debug=Config.DEBUG, threaded=True)
+    app.run(host='127.0.0.1', port=5000, debug=True, threaded=True)
