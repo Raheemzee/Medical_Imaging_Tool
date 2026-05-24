@@ -25,7 +25,7 @@ class Config:
         CACHE_FOLDER = os.path.join(BASE_DIR, 'cache')
     
     # Allowed file types
-    ALLOWED_EXTENSIONS = {'dcm', 'png', 'jpg', 'jpeg', 'bmp', 'tiff', 'nii', 'nii.gz'}
+    ALLOWED_EXTENSIONS = {'dcm', 'png', 'jpg', 'jpeg', 'bmp', 'tiff'}
     
     # Server settings
     HOST = '0.0.0.0'
