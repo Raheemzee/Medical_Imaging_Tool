@@ -1,0 +1,9 @@
+Flask
+flask-cors
+pydicom
+numpy
+Pillow
+werkzeug
+gunicorn
+nibabel
+scikit-image
